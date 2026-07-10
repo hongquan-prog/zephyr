@@ -13,6 +13,16 @@ tests:
       - mimxrt1060_evk@C/mimxrt1062/qspi
       - mimxrt1050_evk/mimxrt1052/hyperflash
       - mimxrt1064_evk
+  drivers.disk.sdmmc.ambiq_apollo4p:
+    platform_type:
+      - mcu
+    extra_args: DTC_OVERLAY_FILE=boards/apollo4p_evb.overlay
+    filter: dt_compat_enabled("ambiq,sdio") and dt_compat_enabled("zephyr,sdmmc-disk")
+    platform_allow:
+      - apollo4p_evb
+    integration_platforms:
+      - apollo4p_evb
+    timeout: 5
   drivers.disk.ram:
     extra_configs:
       - CONFIG_NVME=n
