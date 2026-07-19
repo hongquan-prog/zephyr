@@ -12,6 +12,7 @@
 #include <esp_private/systimer.h>
 #include <rom/ets_sys.h>
 #include <esp_attr.h>
+#include <esp_cpu.h>
 
 #include <zephyr/drivers/interrupt_controller/intc_esp32.h>
 #include <zephyr/drivers/timer/system_timer.h>
@@ -22,21 +23,32 @@
 
 #include "esp32_sys_timer.h"
 
-#ifdef CONFIG_SMP
-void smp_timer_init(void)
-{
-	/* TODO: per-CPU timer initialization for ESP32-P4 SMP */
-}
-#endif
-
 #define CYC_PER_TICK ((uint32_t)((uint64_t)sys_clock_hw_cycles_per_sec()	\
 			      / (uint64_t)CONFIG_SYS_CLOCK_TICKS_PER_SEC))
-#define MAX_CYC 0xffffffffu
+#define MAX_CYC   0xffffffffu
 #define MAX_TICKS ((MAX_CYC - CYC_PER_TICK) / CYC_PER_TICK)
 #define MIN_DELAY 1
 
 #if defined(CONFIG_TEST)
 const int32_t z_sys_timer_irq_for_test = DT_IRQN(DT_NODELABEL(systimer0));
+#endif
+
+#define TICKLESS IS_ENABLED(CONFIG_TICKLESS_KERNEL)
+
+/*
+ * Under SMP each core owns one systimer alarm (core 0 -> alarm 0,
+ * core 1 -> alarm 1) connected to the shared OS_TICK counter, and each
+ * core routes its own alarm interrupt. This mirrors the per-hart
+ * mtimecmp model of the generic RISC-V machine timer driver.
+ */
+#ifdef CONFIG_SMP
+static inline uint32_t sys_timer_alarm_id(void)
+{
+	return (esp_cpu_get_core_id() == 0) ? SYSTIMER_ALARM_OS_TICK_CORE0
+					    : SYSTIMER_ALARM_OS_TICK_CORE1;
+}
+#else
+#define sys_timer_alarm_id() SYSTIMER_ALARM_OS_TICK_CORE0
 #endif
 
 #if defined(CONFIG_PM)
@@ -50,16 +62,15 @@ static systimer_hal_context_t systimer_hal;
 
 static void set_systimer_alarm(uint64_t time)
 {
-	systimer_hal_select_alarm_mode(&systimer_hal,
-		SYSTIMER_ALARM_OS_TICK_CORE0, SYSTIMER_ALARM_MODE_ONESHOT);
-
+	uint32_t alarm_id = sys_timer_alarm_id();
 	systimer_counter_value_t alarm = {.val = time};
 
-	systimer_ll_enable_alarm(systimer_hal.dev, SYSTIMER_ALARM_OS_TICK_CORE0, false);
-	systimer_ll_set_alarm_target(systimer_hal.dev, SYSTIMER_ALARM_OS_TICK_CORE0, alarm.val);
-	systimer_ll_apply_alarm_value(systimer_hal.dev, SYSTIMER_ALARM_OS_TICK_CORE0);
-	systimer_ll_enable_alarm(systimer_hal.dev, SYSTIMER_ALARM_OS_TICK_CORE0, true);
-	systimer_ll_enable_alarm_int(systimer_hal.dev, SYSTIMER_ALARM_OS_TICK_CORE0, true);
+	systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_ONESHOT);
+	systimer_ll_enable_alarm(systimer_hal.dev, alarm_id, false);
+	systimer_ll_set_alarm_target(systimer_hal.dev, alarm_id, alarm.val);
+	systimer_ll_apply_alarm_value(systimer_hal.dev, alarm_id);
+	systimer_ll_enable_alarm(systimer_hal.dev, alarm_id, true);
+	systimer_ll_enable_alarm_int(systimer_hal.dev, alarm_id, true);
 }
 
 static uint64_t get_systimer_alarm(void)
@@ -118,7 +129,9 @@ static void timer_driver_set_compare(uint64_t cycles)
 static void IRAM_ATTR sys_timer_isr(void *arg)
 {
 	ARG_UNUSED(arg);
-	systimer_ll_clear_alarm_int(systimer_hal.dev, SYSTIMER_ALARM_OS_TICK_CORE0);
+	uint32_t alarm_id = sys_timer_alarm_id();
+
+	systimer_ll_clear_alarm_int(systimer_hal.dev, alarm_id);
 
 	timer_core_announce();
 }
@@ -197,8 +210,8 @@ static int sys_clock_driver_init(void)
 	}
 
 	systimer_hal_init(&systimer_hal);
-	systimer_hal_connect_alarm_counter(&systimer_hal,
-		SYSTIMER_ALARM_OS_TICK_CORE0, SYSTIMER_COUNTER_OS_TICK);
+	systimer_hal_connect_alarm_counter(&systimer_hal, SYSTIMER_ALARM_OS_TICK_CORE0,
+					   SYSTIMER_COUNTER_OS_TICK);
 
 	systimer_hal_enable_counter(&systimer_hal, SYSTIMER_COUNTER_OS_TICK);
 	systimer_hal_counter_can_stall_by_cpu(&systimer_hal, SYSTIMER_COUNTER_OS_TICK, 0, true);
@@ -211,5 +224,32 @@ static int sys_clock_driver_init(void)
 	return 0;
 }
 
-SYS_INIT(sys_clock_driver_init, PRE_KERNEL_2,
-	 CONFIG_SYSTEM_CLOCK_INIT_PRIORITY);
+SYS_INIT(sys_clock_driver_init, PRE_KERNEL_2, CONFIG_SYSTEM_CLOCK_INIT_PRIORITY);
+
+#if defined(CONFIG_SMP) && (DT_NUM_IRQS(DT_NODELABEL(systimer0)) > 1)
+/*
+ * Runs on a secondary CPU (via smp_init_top()). The shared OS_TICK
+ * counter is already running thanks to the boot CPU; connect this
+ * core's private alarm to it, route the alarm's interrupt source to
+ * this core (esp_intr_alloc() binds to the calling core) and arm the
+ * first timeout. DT interrupt index 1 is the core-1 alarm source,
+ * so this is only compiled for SoCs describing both alarms.
+ */
+void smp_timer_init(void)
+{
+	int ret = esp_intr_alloc(
+		DT_IRQ_BY_IDX(DT_NODELABEL(systimer0), 1, irq),
+		ESP_PRIO_TO_FLAGS(DT_IRQ_BY_IDX(DT_NODELABEL(systimer0), 1, priority)) |
+			ESP_INT_FLAGS_CHECK(DT_IRQ_BY_IDX(DT_NODELABEL(systimer0), 1, flags)) |
+			ESP_INTR_FLAG_IRAM,
+		sys_timer_isr, NULL, NULL);
+
+	__ASSERT_NO_MSG(ret == 0);
+	ARG_UNUSED(ret);
+
+	systimer_hal_connect_alarm_counter(&systimer_hal, SYSTIMER_ALARM_OS_TICK_CORE1,
+					   SYSTIMER_COUNTER_OS_TICK);
+
+	set_systimer_alarm(get_systimer_alarm() + CYC_PER_TICK);
+}
+#endif /* CONFIG_SMP && DT_NUM_IRQS(systimer0) > 1 */
