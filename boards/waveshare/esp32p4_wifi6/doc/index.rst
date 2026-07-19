@@ -63,6 +63,13 @@ After flashing, open a serial terminal on the same port at 115200 bps::
 
    picocom -b 115200 /dev/ttyACM0
 
+The LP core target (``esp32p4_wifi6/esp32p4/lpcore``) is also available.
+It uses the LP UART with the default pins (GPIO14/15) for the console; to
+flash it, use the same ``esp32`` runner and explicitly select the target::
+
+   west build -b esp32p4_wifi6/esp32p4/lpcore samples/hello_world
+   west flash --runner esp32 --esp-device /dev/ttyACM0
+
 References
 **********
 

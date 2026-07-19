@@ -1,0 +1,55 @@
+/*
+ * Copyright (c) 2026 Hongquan Li
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <espressif/esp32p4/esp32p4_lpcore.dtsi>
+#include <espressif/partitions_0x2000_default_16M.dtsi>
+
+/ {
+	model = "Waveshare ESP32-P4-WIFI6 LP Core";
+	compatible = "espressif,esp32p4";
+
+	chosen {
+		zephyr,sram = &sramlp;
+		zephyr,console = &lp_uart;
+		zephyr,shell-uart = &lp_uart;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_lpcore_partition;
+	};
+};
+
+/* 32 MB flash: default layout with storage extended and scratch/coredump moved to the end */
+&flash0 {
+	reg = <0x0 DT_SIZE_M(32)>;
+	ranges = <0x0 0x0 DT_SIZE_M(32)>;
+
+	partitions {
+		/delete-node/ partition@fe0000;
+		/delete-node/ partition@fff000;
+
+		scratch_partition: partition@1fe0000 {
+			compatible = "zephyr,mapped-partition";
+			label = "image-scratch";
+			reg = <0x1fe0000 DT_SIZE_K(124)>;
+		};
+
+		coredump_partition: partition@1fff000 {
+			compatible = "zephyr,mapped-partition";
+			label = "coredump";
+			reg = <0x1fff000 DT_SIZE_K(4)>;
+		};
+	};
+};
+
+&storage_partition {
+	reg = <0xfb0000 DT_SIZE_K(16576)>;
+};
+
+&lp_uart {
+	status = "okay";
+	current-speed = <115200>;
+};
