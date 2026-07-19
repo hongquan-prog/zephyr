@@ -56,23 +56,23 @@
 			xtal-freq = <DT_FREQ_M(40)>;
 			d-cache-line-size = <64>;
 		};
+	};
 
-		power-states {
-			light_sleep: light_sleep {
-				compatible = "zephyr,power-state";
-				power-state-name = "standby";
-				min-residency-us = <1000>;
-				exit-latency-us = <50>;
-			};
+	power-states {
+		light_sleep: light_sleep {
+			compatible = "zephyr,power-state";
+			power-state-name = "standby";
+			min-residency-us = <1000>;
+			exit-latency-us = <50>;
+		};
 
-			deep_sleep: deep_sleep {
-				/* Deep sleep must be entered using pm_state_force()
-				 * or sys_poweroff() calls only
-				 */
-				compatible = "zephyr,power-state";
-				power-state-name = "soft-off";
-				status = "disabled";
-			};
+		deep_sleep: deep_sleep {
+			/* Deep sleep must be entered using pm_state_force()
+			 * or sys_poweroff() calls only
+			 */
+			compatible = "zephyr,power-state";
+			power-state-name = "soft-off";
+			status = "disabled";
 		};
 	};
 

@@ -22,6 +22,17 @@
 
 #include "esp32_sys_timer.h"
 
+#ifdef CONFIG_SMP
+void smp_timer_init(void)
+{
+	/* TODO: per-CPU timer initialization for ESP32-P4 SMP */
+}
+#endif
+
+#define CYC_PER_TICK ((uint32_t)((uint64_t)sys_clock_hw_cycles_per_sec()	\
+			      / (uint64_t)CONFIG_SYS_CLOCK_TICKS_PER_SEC))
+#define MAX_CYC 0xffffffffu
+#define MAX_TICKS ((MAX_CYC - CYC_PER_TICK) / CYC_PER_TICK)
 #define MIN_DELAY 1
 
 #if defined(CONFIG_TEST)
