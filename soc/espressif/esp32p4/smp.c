@@ -7,6 +7,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/arch/arch_interface.h>
 #include <zephyr/arch/riscv/csr.h>
+#include <kernel_internal.h>
 #include <soc.h>
 #include <esp_cpu.h>
 #include <hal/cpu_utility_ll.h>
@@ -41,6 +42,16 @@ void __attribute__((section(".iram1"))) esp32p4_secondary_start(int hartid)
 
 	/* Signal the boot CPU that we have taken our stack and vectors. */
 	riscv_cpu_boot_flag = 1U;
+
+	/*
+	 * Point this CPU's current thread at its idle thread, which the
+	 * boot CPU initialized in z_init_cpu() before starting us. The
+	 * scheduler only installs the dummy thread on the first context
+	 * switch, and without a valid _current the irq_lock() taken by
+	 * soc_per_core_init_hook() (esp_intr_alloc()) would dereference
+	 * NULL. The hartid matches the kernel CPU index on this SoC.
+	 */
+	_kernel.cpus[hartid].current = &z_idle_threads[hartid];
 
 	arch_secondary_cpu_init(hartid);
 }
