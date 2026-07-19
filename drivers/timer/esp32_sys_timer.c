@@ -247,9 +247,18 @@ void smp_timer_init(void)
 	__ASSERT_NO_MSG(ret == 0);
 	ARG_UNUSED(ret);
 
+	/*
+	 * The boot CPU's tick ISR is already running and performs the same
+	 * read-modify-writes on the shared SYSTIMER conf/int_ena registers
+	 * under this lock; take it so the alarm setup below cannot lose an
+	 * update against the ISR.
+	 */
+	k_spinlock_key_t key = sys_clock_lock();
+
 	systimer_hal_connect_alarm_counter(&systimer_hal, SYSTIMER_ALARM_OS_TICK_CORE1,
 					   SYSTIMER_COUNTER_OS_TICK);
 
 	set_systimer_alarm(get_systimer_alarm() + CYC_PER_TICK);
+	sys_clock_unlock(key);
 }
 #endif /* CONFIG_SMP && DT_NUM_IRQS(systimer0) > 1 */
