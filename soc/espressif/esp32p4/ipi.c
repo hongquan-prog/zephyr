@@ -6,9 +6,12 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/arch/arch_interface.h>
+#include <zephyr/arch/riscv/csr.h>
 #include <zephyr/drivers/interrupt_controller/intc_esp32.h>
 
 #include <ipi.h>
+#include <kernel_internal.h>
+#include <kernel_arch_interface.h>
 
 #include <soc.h>
 #include <esp_cpu.h>
@@ -24,6 +27,15 @@
  * enables its own source through the CLIC interrupt matrix, which
  * esp_intr_alloc() does for the calling core.
  */
+#ifdef CONFIG_FPU_SHARING
+/*
+ * Pending IPI reasons per CPU. The cross-core interrupt itself is the
+ * scheduler IPI and needs no flag; FPU flush requests do.
+ */
+static atomic_val_t cpu_pending_ipi[CONFIG_MP_MAX_NUM_CPUS];
+#define IPI_FPU_FLUSH 0
+#endif /* CONFIG_FPU_SHARING */
+
 static void esp32p4_crosscore_isr(void *arg)
 {
 	ARG_UNUSED(arg);
@@ -32,6 +44,14 @@ static void esp32p4_crosscore_isr(void *arg)
 	crosscore_int_ll_clear_interrupt((int)esp_cpu_get_core_id());
 
 	z_sched_ipi();
+
+#ifdef CONFIG_FPU_SHARING
+	if (atomic_test_and_clear_bit(&cpu_pending_ipi[_current_cpu->id], IPI_FPU_FLUSH)) {
+		/* Disable IRQs, then perform the flush. */
+		csr_clear(mstatus, MSTATUS_IEN);
+		arch_flush_local_fpu();
+	}
+#endif /* CONFIG_FPU_SHARING */
 }
 
 static int esp32p4_ipi_init_this_core(void)
@@ -75,13 +95,27 @@ void soc_per_core_init_hook(void)
 }
 
 #ifdef CONFIG_FPU_SHARING
-void arch_flush_fpu_ipi(void)
+void arch_flush_fpu_ipi(unsigned int cpu)
 {
-	/* TODO: implement FPU flush IPI for ESP32-P4 */
+	atomic_set_bit(&cpu_pending_ipi[cpu], IPI_FPU_FLUSH);
+	crosscore_int_ll_trigger_interrupt((int)cpu);
 }
 
+/*
+ * Make sure there is no pending FPU flush request for this CPU while
+ * waiting for a contended spinlock to become available. This prevents
+ * a deadlock when the lock we need is already taken by another CPU
+ * that also wants its FPU content to be reinstated while such content
+ * is still live in this CPU's FPU.
+ */
 void arch_spin_relax(void)
 {
-	/* TODO: implement arch_spin_relax for ESP32-P4 */
+	if (atomic_test_and_clear_bit(&cpu_pending_ipi[_current_cpu->id], IPI_FPU_FLUSH)) {
+		/*
+		 * We may not be in IRQ context here hence cannot use
+		 * arch_flush_local_fpu() directly.
+		 */
+		arch_float_disable(_current_cpu->arch.fpu_owner);
+	}
 }
 #endif /* CONFIG_FPU_SHARING */
