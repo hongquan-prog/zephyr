@@ -7,8 +7,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/arch/arch_interface.h>
 
-#ifdef CONFIG_SMP
-
 void arch_sched_directed_ipi(uint32_t cpu_bitmap)
 {
 	ARG_UNUSED(cpu_bitmap);
@@ -31,5 +29,3 @@ void arch_spin_relax(void)
 	/* TODO: implement arch_spin_relax for ESP32-P4 */
 }
 #endif /* CONFIG_FPU_SHARING */
-
-#endif /* CONFIG_SMP */

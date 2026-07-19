@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <esp_attr.h>
 #include <esp_private/esp_clk.h>
+#include <riscv/rv_utils.h>
 #endif
 
 /* ECALL Exception numbers */
@@ -33,7 +34,7 @@ void __esp_platform_app_start(void);
 
 static inline uint32_t esp_core_id(void)
 {
-	return 0;
+	return rv_utils_get_core_id();
 }
 
 extern int esp_rom_gpio_matrix_in(uint32_t gpio, uint32_t signal_index, bool inverted);

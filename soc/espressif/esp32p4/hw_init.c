@@ -28,7 +28,12 @@
 #include <soc_flash_init.h>
 #include <soc_init.h>
 
+#include <zephyr/kernel.h>
+#include <zephyr/arch/riscv/csr.h>
+
 #define TAG "boot"
+
+extern struct k_thread z_main_thread;
 
 /*
  * Validate that the silicon revision meets the minimum configured through
@@ -51,6 +56,19 @@ static void check_chip_revision(void)
 int hardware_init(void)
 {
 	int err = 0;
+
+#if defined(CONFIG_SMP)
+	/*
+	 * On SMP builds irq_lock() expands to z_smp_global_lock(), which
+	 * dereferences the current thread through mscratch. hardware_init()
+	 * runs before z_cstart(), so mscratch and _kernel.cpus[0].current are
+	 * not initialized yet. Point them at cpu0 and the main thread so that
+	 * early irq_lock()/irq_unlock() callers (regi2c, flash, ...) work
+	 * before the kernel is up.
+	 */
+	csr_write(mscratch, &_kernel.cpus[0]);
+	_kernel.cpus[0].current = &z_main_thread;
+#endif
 
 	soc_hw_init();
 	ana_reset_config();
