@@ -11,6 +11,9 @@
 #include <soc.h>
 #include <esp_cpu.h>
 #include <hal/cpu_utility_ll.h>
+#include <hal/interrupt_clic_ll.h>
+#include <riscv/interrupt.h>
+#include <soc/interrupts.h>
 
 extern volatile uintptr_t riscv_cpu_wake_flag;
 extern volatile uintptr_t riscv_cpu_boot_flag;
@@ -27,15 +30,35 @@ extern char _mtvt_table[];
 void arch_secondary_cpu_init(int hartid);
 
 /*
+ * Clear this core's CLIC interrupt routing matrix and set all CPU
+ * interrupt lines to vectored mode, mirroring what
+ * core_intr_matrix_clear() in soc.c does for the boot core (and what
+ * ESP-IDF's cpu_start.c does on every core). Runs at SMP init time,
+ * after the flash cache is up, so plain .text is fine.
+ */
+static void esp32p4_secondary_intr_matrix_init(void)
+{
+	for (int i = 0; i < ETS_MAX_INTR_SOURCE; i++) {
+		interrupt_clic_ll_route(esp_cpu_get_core_id(), i, ETS_INVALID_INUM);
+	}
+
+	for (int i = 0; i < 32; i++) {
+		esprv_int_set_vectored(i, true);
+	}
+}
+
+/*
  * C portion of the CPU1 bring-up. Reached from
  * esp32p4_zephyr_secondary_entry() with a valid stack and global pointer.
  * Runs on CPU1 in M-mode.
  */
-void __attribute__((section(".iram1"))) esp32p4_secondary_start(int hartid)
+void esp32p4_secondary_start(int hartid)
 {
 	/* Set up CLIC vectors for this core. */
 	csr_write(mtvec, (uintptr_t)_vector_table);
 	csr_write(0x307, (uintptr_t)_mtvt_table); /* mtvt */
+
+	esp32p4_secondary_intr_matrix_init();
 
 	/* Clear the boot address so a later reset does not re-enter here. */
 	ets_set_appcpu_boot_addr(0);
@@ -61,7 +84,7 @@ void __attribute__((section(".iram1"))) esp32p4_secondary_start(int hartid)
  * appcpu boot address and unstalled CPU1. Sets up the global pointer and
  * the per-CPU stack prepared by arch_cpu_start(), then continues in C.
  */
-void __attribute__((naked, section(".iram1"))) esp32p4_zephyr_secondary_entry(void)
+void esp32p4_zephyr_secondary_entry(void)
 {
 	__asm__ volatile(
 		".option push\n"
