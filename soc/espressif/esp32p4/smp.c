@@ -15,7 +15,9 @@
 #include <riscv/interrupt.h>
 #include <soc/interrupts.h>
 
-extern volatile uintptr_t riscv_cpu_wake_flag;
+/* CLIC vector table base CSR (not in the standard riscv csr.h). */
+#define CSR_MTVT 0x307
+
 extern volatile uintptr_t riscv_cpu_boot_flag;
 extern volatile void *riscv_cpu_sp;
 
@@ -56,7 +58,7 @@ void esp32p4_secondary_start(int hartid)
 {
 	/* Set up CLIC vectors for this core. */
 	csr_write(mtvec, (uintptr_t)_vector_table);
-	csr_write(0x307, (uintptr_t)_mtvt_table); /* mtvt */
+	csr_write(CSR_MTVT, (uintptr_t)_mtvt_table);
 
 	esp32p4_secondary_intr_matrix_init();
 
@@ -83,8 +85,10 @@ void esp32p4_secondary_start(int hartid)
  * CPU1 entry point. The ROM jumps here after arch_cpu_start() sets the
  * appcpu boot address and unstalled CPU1. Sets up the global pointer and
  * the per-CPU stack prepared by arch_cpu_start(), then continues in C.
+ * Naked: this runs with an undefined stack pointer straight from the ROM,
+ * so the compiler must not emit a prologue touching the stack.
  */
-void esp32p4_zephyr_secondary_entry(void)
+__attribute__((naked)) void esp32p4_zephyr_secondary_entry(void)
 {
 	__asm__ volatile(
 		".option push\n"
@@ -119,6 +123,5 @@ void arch_cpu_start(int cpu_num, k_thread_stack_t *stack, int sz,
 	esp_cpu_unstall(1);
 
 	while (riscv_cpu_boot_flag == 0U) {
-		riscv_cpu_wake_flag = _kernel.cpus[cpu_num].arch.hartid;
 	}
 }
