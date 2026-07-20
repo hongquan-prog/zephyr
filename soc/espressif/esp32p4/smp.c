@@ -76,7 +76,9 @@ void esp32p4_secondary_start(int hartid)
 	 * soc_per_core_init_hook() (esp_intr_alloc()) would dereference
 	 * NULL. The hartid matches the kernel CPU index on this SoC.
 	 */
+#ifdef CONFIG_MULTITHREADING
 	_kernel.cpus[hartid].current = &z_idle_threads[hartid];
+#endif
 
 	arch_secondary_cpu_init(hartid);
 }
