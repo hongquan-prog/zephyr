@@ -64,11 +64,17 @@ static int esp32p4_ipi_init_this_core(void)
 
 void arch_sched_directed_ipi(uint32_t cpu_bitmap)
 {
+	unsigned int key = arch_irq_lock();
+	unsigned int id = _current_cpu->id;
+
 	for (unsigned int cpu = 0; cpu < arch_num_cpus(); cpu++) {
-		if ((cpu_bitmap & BIT(cpu)) != 0U) {
+		if ((cpu != id) && _kernel.cpus[cpu].arch.online &&
+		    ((cpu_bitmap & BIT(cpu)) != 0U)) {
 			crosscore_int_ll_trigger_interrupt((int)cpu);
 		}
 	}
+
+	arch_irq_unlock(key);
 }
 
 int arch_smp_init(void)
