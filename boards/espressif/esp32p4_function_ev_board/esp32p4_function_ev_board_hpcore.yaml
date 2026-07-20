@@ -8,12 +8,14 @@ toolchain:
 testing:
   ignore_tags:
     - heap
+  flash_before: true
 supported:
   - counter
   - entropy
   - gpio
   - hwinfo
   - sdhc
+  - smp
   - spi
   - uart
   - watchdog
