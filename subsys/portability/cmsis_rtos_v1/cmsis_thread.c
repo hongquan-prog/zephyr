@@ -5,6 +5,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/arch/arch_interface.h>
 #include <zephyr/sys/atomic.h>
 #include <cmsis_os.h>
 
@@ -51,7 +52,6 @@ void thread_abort_hook(struct k_thread *thread)
 
 #ifdef CONFIG_THREAD_STACK_MEM_MAPPED
 		/* The offset calculation below requires physical address. */
-		extern int arch_page_phys_get(void *virt, uintptr_t *phys);
 		(void)arch_page_phys_get((void *)thread->stack_info.start, &stack_start);
 #else
 		stack_start = thread->stack_info.start;
