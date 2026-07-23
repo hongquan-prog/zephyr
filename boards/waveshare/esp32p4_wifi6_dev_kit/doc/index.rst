@@ -66,6 +66,15 @@ separate USB CDC ACM device. Open a serial terminal on that port at
 
    picocom -b 115200 /dev/ttyACM1
 
+The LP core target (``esp32p4_wifi6_dev_kit/esp32p4/lpcore``) is also
+available. Its console uses the LP UART on GPIO5 (TX) / GPIO4 (RX), routed
+to the 40-pin header (pins 9/11); the SoC default LP UART pins (GPIO14/15)
+are wired to the ESP32-C6 SDIO interface on this board. To flash it, use
+the same ``esp32`` runner and explicitly select the target::
+
+   west build -b esp32p4_wifi6_dev_kit/esp32p4/lpcore samples/hello_world
+   west flash --runner esp32 --esp-device /dev/ttyACM0
+
 .. include:: ../../../espressif/common/building-flashing.rst
    :start-after: espressif-building-flashing
 
