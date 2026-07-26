@@ -61,10 +61,22 @@
 	clock-frequency = <I2C_BITRATE_FAST>;
 	pinctrl-0 = <&i2c0_default>;
 	pinctrl-names = "default";
+
+	es8311: es8311@18 {
+		compatible = "everest,es8311";
+		reg = <0x18>;
+		status = "okay";
+		/* GPIO53: power amplifier enable (active-high) */
+		pa-gpios = <&gpio1 21 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &i2s0 {
-	status = "disabled";
+	dmas = <&dma 2>, <&dma 3>;
+	dma-names = "rx", "tx";
+	unit = <0>;
+
+	status = "okay";
 	pinctrl-0 = <&i2s0_default>;
 	pinctrl-names = "default";
 };
