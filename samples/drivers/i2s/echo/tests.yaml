@@ -19,3 +19,4 @@ tests:
     build_only: true
     platform_allow:
       - esp32p4_wifi6/esp32p4/hpcore
+      - esp32p4_wifi6_dev_kit/esp32p4/hpcore
