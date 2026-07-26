@@ -35,7 +35,14 @@
 
 LOG_MODULE_REGISTER(i2s_esp32, CONFIG_I2S_LOG_LEVEL);
 
+/* I2S_CLK_SRC_DEFAULT is 0 on ESP32-P4 (auto-select), which is not a valid
+ * argument for esp_clk_tree_src_get_freq_hz(); use PLL_F160M explicitly there.
+ */
+#if defined(CONFIG_SOC_SERIES_ESP32P4)
+#define I2S_ESP32_CLK_SRC             I2S_CLK_SRC_PLL_160M
+#else
 #define I2S_ESP32_CLK_SRC             I2S_CLK_SRC_DEFAULT
+#endif
 #define I2S_ESP32_DMA_BUFFER_MAX_SIZE 4092
 
 #define I2S_ESP32_NUM_INST_OK          DT_NUM_INST_STATUS_OKAY(espressif_esp32_i2s)
