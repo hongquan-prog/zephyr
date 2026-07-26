@@ -19,3 +19,23 @@ config STOP_START_STREAMS_SW1
 	depends on $(dt_alias_enabled,sw1)
 	select GPIO
 	default y
+
+config I2S_MCLK_FREQUENCY
+	int "MCLK frequency in Hz"
+	default 11289600
+	help
+	  Master clock frequency for the codec.  Defaults to
+	  256 * 44100 Hz (standard for 44.1 kHz with 256× MCLK
+	  ratio, used by ES8311 and similar codecs).
+
+config APP_OUTPUT_VOLUME
+	int "Output volume percentage (0-100)"
+	default 50
+	help
+	  Volume level for the audio codec output.
+
+config APP_INPUT_GAIN_DB
+	int "Microphone gain in dB"
+	default 6
+	help
+	  Microphone PGA gain for the audio codec input.

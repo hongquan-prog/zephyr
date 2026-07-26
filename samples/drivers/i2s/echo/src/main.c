@@ -276,12 +276,20 @@ int main(void)
 	audio_cfg.dai_cfg.i2s.word_size = SAMPLE_BIT_WIDTH;
 	audio_cfg.dai_cfg.i2s.channels = NUMBER_OF_CHANNELS;
 	audio_cfg.dai_cfg.i2s.format = I2S_FMT_DATA_FORMAT_I2S;
-	audio_cfg.dai_cfg.i2s.options = I2S_OPT_FRAME_CLK_CONTROLLER;
+	audio_cfg.dai_cfg.i2s.options = I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER;
 	audio_cfg.dai_cfg.i2s.frame_clk_freq = SAMPLE_FREQUENCY;
 	audio_cfg.dai_cfg.i2s.mem_slab = &mem_slab;
 	audio_cfg.dai_cfg.i2s.block_size = BLOCK_SIZE;
+	audio_cfg.mclk_freq = CONFIG_I2S_MCLK_FREQUENCY;
 	audio_codec_configure(codec_dev, &audio_cfg);
 	k_msleep(1000);
+	audio_codec_set_property(codec_dev, AUDIO_PROPERTY_OUTPUT_VOLUME,
+			 AUDIO_CHANNEL_ALL,
+				 (audio_property_value_t){.vol = CONFIG_APP_OUTPUT_VOLUME});
+	audio_codec_set_property(codec_dev, AUDIO_PROPERTY_INPUT_VOLUME,
+			 AUDIO_CHANNEL_ALL,
+				 (audio_property_value_t){.vol = CONFIG_APP_INPUT_GAIN_DB});
+	audio_codec_start_output(codec_dev);
 #endif
 
 #if DT_ON_BUS(MAX9867_NODE, i2c)

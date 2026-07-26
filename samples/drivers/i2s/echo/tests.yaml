@@ -14,3 +14,8 @@ tests:
       type: one_line
       regex:
         - "I2S echo sample"
+  sample.drivers.i2s.echo.es8311:
+    tags: i2s
+    build_only: true
+    platform_allow:
+      - esp32p4_wifi6/esp32p4/hpcore

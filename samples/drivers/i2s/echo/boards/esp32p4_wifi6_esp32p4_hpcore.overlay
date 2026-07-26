@@ -1,0 +1,5 @@
+/* Map the generic nodelabels used by the I2S echo sample to the
+ * ES8311 codec and I2S0 peripheral.
+ */
+i2s_rxtx: &i2s0 {};
+audio_codec: &es8311 {};
