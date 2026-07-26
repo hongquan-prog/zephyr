@@ -28,7 +28,8 @@ The board included peripherals:
 - 2-lane MIPI DSI display connector
 - MicroSD card slot (4-bit SDHC at 40 MHz: clk=43, cmd=44, d0=39, d1=40,
   d2=41, d3=42), powered through a GPIO45 load switch
-- I2C0 bus (SDA=GPIO7, SCL=GPIO8, 400 kHz)
+- I2C0 bus (SDA=GPIO7, SCL=GPIO8, 400 kHz) with an on-board ES8311
+  audio codec at address 0x18
 - 40-pin GPIO expansion header (Raspberry Pi Pico pinout)
 - Boot (GPIO35) and reset buttons
 
@@ -39,9 +40,12 @@ LP core images, followed by a 192 KB ``storage`` partition; the
 flash.
 
 Three internal LDO regulators are configured as always-on: ``ldo1`` and
-``ldo4`` at 3.3 V, and ``ldo2`` at 1.8 V. MIPI DSI/CSI, I2S audio and the
-ESP32-C6 SDIO wireless co-processor are not enabled in this initial board
-port.
+``ldo4`` at 3.3 V, and ``ldo2`` at 1.8 V. MIPI DSI/CSI and the ESP32-C6 SDIO wireless co-processor are not
+enabled in this initial board port. I2S0 is enabled with the on-board
+ES8311 codec for audio playback and capture:
+
+  - MCLK = GPIO13, BCK = GPIO12, WS = GPIO10, SD_OUT = GPIO9, SD_IN = GPIO11
+  - ES8311 PA enable = GPIO53 (active-high)
 
 .. include:: ../../../espressif/common/soc-esp32p4-features.rst
    :start-after: espressif-soc-esp32p4-features

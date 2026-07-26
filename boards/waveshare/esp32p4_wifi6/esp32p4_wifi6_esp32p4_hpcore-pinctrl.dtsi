@@ -33,11 +33,22 @@
 
 	i2s0_default: i2s0_default {
 		group1 {
-			pinmux = <I2S0_MCLK_GPIO13>,
+			/* The I2S_RX unit runs in slave mode in full-duplex
+			 * configurations and takes BCK/WS from its input
+			 * signals, so route them from the same pins the TX
+			 * unit drives (like the ESP-IDF full-duplex setup
+			 * does). List them before the TX outputs: each pin
+			 * has a single output-select register and the last
+			 * matrix_out wins, while input routing is kept in
+			 * separate registers.
+			 */
+			pinmux = <I2S0_I_WS_GPIO10>,
+				 <I2S0_I_BCK_GPIO12>,
+				 <I2S0_MCLK_GPIO13>,
 				 <I2S0_O_BCK_GPIO12>,
 				 <I2S0_O_WS_GPIO10>,
-				 <I2S0_O_SD_GPIO9>,
-				 <I2S0_I_SD_GPIO11>;
+				 <I2S0_I_SD_GPIO11>,
+				 <I2S0_O_SD_GPIO9>;
 		};
 	};
 };
