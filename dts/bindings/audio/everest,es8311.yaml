@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Process Mission
+# SPDX-License-Identifier: Apache-2.0
+
+description: Everest Semiconductor ES8311 low power mono audio codec
+
+include: [i2c-device.yaml]
+
+compatible: "everest,es8311"
+
+properties:
+  pa-gpios:
+    type: phandle-array
+    description: |
+      Power amplifier enable pin, driven active while the codec is
+      started and inactive while it is suspended.

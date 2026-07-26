@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Process Mission
+# SPDX-License-Identifier: Apache-2.0
+
+config AUDIO_CODEC_ES8311
+	bool "Everest ES8311 driver"
+	default y
+	select I2C
+	depends on GPIO
+	depends on DT_HAS_EVEREST_ES8311_ENABLED
+	help
+	  Enable the driver for the Everest Semiconductor ES8311 low power
+	  mono audio codec with ADC and DAC.
