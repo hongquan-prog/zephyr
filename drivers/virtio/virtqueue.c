@@ -11,6 +11,7 @@
 #include <zephyr/sys/barrier.h>
 #include <zephyr/sys/util.h>
 #include <errno.h>
+#include "virtio_common.h"
 
 LOG_MODULE_REGISTER(virtio, CONFIG_VIRTIO_LOG_LEVEL);
 
@@ -19,14 +20,344 @@ LOG_MODULE_REGISTER(virtio, CONFIG_VIRTIO_LOG_LEVEL);
  * https://docs.oasis-open.org/virtio/virtio/v1.3/csd01/virtio-v1.3-csd01.pdf
  */
 
-/*
- * The maximum queue size is 2^15 (see 2.7),
- * so any 16bit value larger than that can be used as a sentinel in the next field
- */
-#define VIRTQ_DESC_NEXT_SENTINEL 0xffff
-
 /* According to the spec 2.7.5.2 the maximum size of descriptor chain is 4GB */
 #define MAX_DESCRIPTOR_CHAIN_LENGTH BIT64(32)
+
+BUILD_ASSERT((CONFIG_VIRTIO_WAKE_QUEUE_PRIORITY >= -CONFIG_NUM_COOP_PRIORITIES) &&
+		     (CONFIG_VIRTIO_WAKE_QUEUE_PRIORITY < CONFIG_NUM_PREEMPT_PRIORITIES),
+	     "CONFIG_VIRTIO_WAKE_QUEUE_PRIORITY is not a valid non-idle priority");
+
+/*
+ * Shared workqueue running the per-virtqueue wake handlers. It is deliberately
+ * not the system workqueue: a handler blocked there must not delay descriptor
+ * notifications. Started lazily by virtq_create(), serialized by
+ * virtio_wake_queue_lock, and never stopped, drained or plugged.
+ */
+static struct k_work_q virtio_wake_queue;
+static K_KERNEL_STACK_DEFINE(virtio_wake_stack, CONFIG_VIRTIO_WAKE_QUEUE_STACK_SIZE);
+static K_MUTEX_DEFINE(virtio_wake_queue_lock);
+static bool virtio_wake_queue_started;
+
+static void virtq_wake_handler(struct k_work *work)
+{
+	struct virtq *v = CONTAINER_OF(work, struct virtq, wake_work);
+
+	k_mutex_lock(&v->slow_lock, K_FOREVER);
+	k_condvar_broadcast(&v->slow_cond);
+	k_mutex_unlock(&v->slow_lock);
+}
+
+static void virtio_wake_queue_start_once(void)
+{
+	k_mutex_lock(&virtio_wake_queue_lock, K_FOREVER);
+
+	if (!virtio_wake_queue_started) {
+		k_work_queue_init(&virtio_wake_queue);
+		k_work_queue_start(&virtio_wake_queue, virtio_wake_stack,
+				   K_KERNEL_STACK_SIZEOF(virtio_wake_stack),
+				   CONFIG_VIRTIO_WAKE_QUEUE_PRIORITY, NULL);
+		/* Published only once the worker can run work items. */
+		virtio_wake_queue_started = true;
+	}
+
+	k_mutex_unlock(&virtio_wake_queue_lock);
+}
+
+static void virtq_submit_wake(struct virtq *v)
+{
+	int ret = k_work_submit_to_queue(&virtio_wake_queue, &v->wake_work);
+
+	if (ret < 0) {
+		/*
+		 * Submitting is part of the lifecycle contract: 0, 1 and 2 mean
+		 * the notification is pending, anything else means a waiter may
+		 * sleep forever. There is no fallback wake protocol.
+		 */
+		LOG_ERR("could not submit virtqueue wake work (%d)", ret);
+		__ASSERT(false, "virtqueue wake work submission failed (%d)", ret);
+	}
+}
+
+/*
+ * The free descriptor count, the stack depth and the queue size disagree, so
+ * the accounting the reservation path relies on is broken. Assertions report
+ * it; without them there is no safe way to continue.
+ */
+static void virtq_fatal_accounting(struct virtq *v)
+{
+	LOG_ERR("virtqueue free descriptor accounting is corrupted (size %u)", v->num);
+	__ASSERT(false, "virtqueue free descriptor accounting is corrupted");
+
+	if (!IS_ENABLED(CONFIG_ASSERT)) {
+		k_panic();
+	}
+}
+
+/* Caller holds v->lock. */
+static bool virtq_chain_length(struct virtq *v, uint16_t head, uint16_t *length)
+{
+	uint16_t curr = head;
+
+	for (uint16_t i = 0; i < v->num; i++) {
+		if (curr >= v->num) {
+			return false;
+		}
+
+		if ((sys_le16_to_cpu(v->desc[curr].flags) & VIRTQ_DESC_F_NEXT) == 0U) {
+			*length = i + 1U;
+			return true;
+		}
+
+		curr = sys_le16_to_cpu(v->desc[curr].next);
+	}
+
+	return false;
+}
+
+/*
+ * Caller holds v->lock. The chain has been validated, so every index is in
+ * range and the chain terminates after count descriptors. Each next link is
+ * read before its descriptor becomes reusable.
+ */
+static void virtq_push_chain(struct virtq *v, uint16_t head, uint16_t count)
+{
+	uint16_t curr = head;
+
+	for (uint16_t i = 0; i < count; i++) {
+		uint16_t next = sys_le16_to_cpu(v->desc[curr].next);
+
+		if (k_stack_push(&v->free_desc_stack, curr) != 0) {
+			virtq_fatal_accounting(v);
+		}
+
+		curr = next;
+	}
+}
+
+/*
+ * Caller holds v->lock. Publishes a validated batch, updates the count and
+ * reports whether a wakeup has to be submitted after the lock is released.
+ */
+static bool virtq_publish_locked(struct virtq *v, uint16_t head, uint16_t count)
+{
+	virtq_push_chain(v, head, count);
+	atomic_add(&v->free_desc_n, count);
+	__ASSERT_NO_MSG((uint32_t)atomic_get(&v->free_desc_n) <= v->num);
+
+	/* Read after the descriptors are back on the stack. */
+	return atomic_get(&v->waiters) > 0;
+}
+
+/*
+ * Caller holds v->lock. The free descriptor count is the only authority on
+ * availability: a count large enough for the whole chain guarantees that the
+ * following non-blocking pops succeed.
+ */
+static int virtq_reserve_locked(struct virtq *v, uint16_t count, uint16_t *head)
+{
+	uint16_t first = 0;
+	uint16_t prev = 0;
+
+	if ((uint32_t)atomic_get(&v->free_desc_n) < count) {
+		return -EBUSY;
+	}
+
+	for (uint16_t i = 0; i < count; i++) {
+		stack_data_t desc;
+
+		if (k_stack_pop(&v->free_desc_stack, &desc, K_NO_WAIT) != 0) {
+			/*
+			 * The count promised enough descriptors, so a failed pop
+			 * is broken bookkeeping, not a retryable shortage. Put
+			 * back whatever was taken so the queue is not left with
+			 * descriptors lost in the middle of a chain.
+			 */
+			if (i > 0U) {
+				virtq_push_chain(v, first, i);
+			}
+
+			virtq_fatal_accounting(v);
+
+			return -EIO;
+		}
+
+		if (i == 0U) {
+			first = (uint16_t)desc;
+		} else {
+			/* Linked temporarily; overwritten when the chain is built. */
+			v->desc[prev].next = sys_cpu_to_le16((uint16_t)desc);
+		}
+
+		prev = (uint16_t)desc;
+	}
+
+	atomic_sub(&v->free_desc_n, count);
+	__ASSERT_NO_MSG((uint32_t)atomic_get(&v->free_desc_n) <= v->num);
+	*head = first;
+
+	return 0;
+}
+
+static int virtq_reserve_fast(struct virtq *v, uint16_t count, uint16_t *head)
+{
+	k_spinlock_key_t key = k_spin_lock(&v->lock);
+	int ret = virtq_reserve_locked(v, count, head);
+
+	k_spin_unlock(&v->lock, key);
+
+	return ret;
+}
+
+/* Called with v->slow_lock held; returns with it held. */
+static int virtq_reserve_wait_locked(struct virtq *v, uint16_t count, uint16_t *head,
+				     k_timepoint_t deadline)
+{
+	for (;;) {
+		k_timeout_t remaining = sys_timepoint_timeout(deadline);
+
+		if (K_TIMEOUT_EQ(remaining, K_NO_WAIT)) {
+			return -EAGAIN;
+		}
+
+		if (virtq_reserve_fast(v, count, head) == 0) {
+			return 0;
+		}
+
+		/*
+		 * The attempt may have crossed the deadline while it waited for
+		 * the queue lock or was preempted; never block with a budget
+		 * measured before it.
+		 */
+		remaining = sys_timepoint_timeout(deadline);
+		if (K_TIMEOUT_EQ(remaining, K_NO_WAIT)) {
+			return -EAGAIN;
+		}
+
+		/*
+		 * k_condvar_wait() releases the mutex atomically with pending
+		 * this thread, so a wake handler cannot miss the window. It
+		 * re-acquires the mutex with K_FOREVER, which is why a timeout
+		 * can only promise "no later than deadline plus one mutex
+		 * acquisition plus scheduling latency".
+		 */
+		if (k_condvar_wait(&v->slow_cond, &v->slow_lock, remaining) != 0) {
+			return -EAGAIN;
+		}
+	}
+}
+
+static int virtq_reserve_slow(struct virtq *v, uint16_t count, uint16_t *head,
+			      k_timepoint_t deadline)
+{
+	k_timeout_t remaining = sys_timepoint_timeout(deadline);
+	int ret;
+
+	/*
+	 * Register before the reservation attempt whose failure can precede the
+	 * first sleep: a release pushes descriptors before it reads this
+	 * counter, so either the attempt below sees them or the matching wake
+	 * is guaranteed.
+	 */
+	atomic_inc(&v->waiters);
+
+	if (K_TIMEOUT_EQ(remaining, K_NO_WAIT)) {
+		ret = -EAGAIN;
+	} else {
+		ret = k_mutex_lock(&v->slow_lock, remaining);
+
+		/* No caller of the thread blocking API may observe a mutex code. */
+		if (ret != 0) {
+			if (ret != -EAGAIN) {
+				LOG_ERR("unexpected mutex error %d while reserving", ret);
+			}
+			ret = -EAGAIN;
+		} else {
+			ret = virtq_reserve_wait_locked(v, count, head, deadline);
+			k_mutex_unlock(&v->slow_lock);
+		}
+	}
+
+	atomic_dec(&v->waiters);
+
+	return ret;
+}
+
+static int virtq_reserve(struct virtq *v, uint16_t count, uint16_t *head, k_timeout_t timeout)
+{
+	k_timepoint_t deadline;
+
+	/* A reservation can never be larger than the queue itself. */
+	if (count > v->num) {
+		return -EINVAL;
+	}
+
+	/*
+	 * Interrupt context never waits, regardless of the requested timeout,
+	 * and neither does a caller that asked not to wait. The same -EBUSY is
+	 * what the legacy blocking pop returned in those cases. These callers
+	 * never block, so they do not pay for reading the clock either.
+	 */
+	if (k_is_in_isr() || K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
+		return virtq_reserve_fast(v, count, head) == 0 ? 0 : -EBUSY;
+	}
+
+	/*
+	 * The single budget starts here, at call entry, so the non-blocking
+	 * attempt below is charged to it as well.
+	 */
+	deadline = sys_timepoint_calc(timeout);
+
+	if (virtq_reserve_fast(v, count, head) == 0) {
+		return 0;
+	}
+
+	return virtq_reserve_slow(v, count, head, deadline);
+}
+
+static bool virtq_release_allowed(struct virtq *v, uint16_t count)
+{
+	uint32_t free_n = (uint32_t)atomic_get(&v->free_desc_n);
+
+	return free_n <= v->num && count <= (uint32_t)v->num - free_n;
+}
+
+int virtq_release_chain(struct virtq *v, uint16_t head)
+{
+	const char *rejected = NULL;
+	uint16_t count;
+	bool wake = false;
+	k_spinlock_key_t key;
+
+	if (head >= v->num) {
+		LOG_ERR("invalid descriptor chain head %u (queue size %u)", head, v->num);
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&v->lock);
+
+	/* Validate the whole chain before publishing any part of it. */
+	if (!virtq_chain_length(v, head, &count)) {
+		rejected = "malformed or terminates outside the descriptor table";
+	} else if (!virtq_release_allowed(v, count)) {
+		rejected = "does not fit the free list";
+	} else {
+		wake = virtq_publish_locked(v, head, count);
+	}
+
+	k_spin_unlock(&v->lock, key);
+
+	if (rejected != NULL) {
+		LOG_ERR("descriptor chain at %u rejected: %s (queue size %u)", head, rejected,
+			v->num);
+		return -EINVAL;
+	}
+
+	if (wake) {
+		virtq_submit_wake(v);
+	}
+
+	return 0;
+}
 
 int virtq_create(struct virtq *v, size_t size)
 {
@@ -40,6 +371,16 @@ int virtq_create(struct virtq *v, size_t size)
 		LOG_ERR("invalid virtqueue size %zu", size);
 		return -EINVAL;
 	}
+
+	/*
+	 * Creating a queue starts the shared wake workqueue on first use, which
+	 * requires thread context.
+	 */
+	__ASSERT(!k_is_in_isr(), "virtqueues must be created from thread context");
+	if (k_is_in_isr()) {
+		return -EINVAL;
+	}
+
 	/*
 	 * For sizes and alignments see table in spec 2.7. We are supporting only modern virtio, so
 	 * we don't have to adhere to additional constraints from spec 2.7.2
@@ -84,13 +425,38 @@ int virtq_create(struct virtq *v, size_t size)
 	for (uint16_t i = 0; i < size; i++) {
 		k_stack_push(&v->free_desc_stack, i);
 	}
-	v->free_desc_n = size;
+	atomic_set(&v->free_desc_n, size);
+	atomic_set(&v->waiters, 0);
+
+	k_mutex_init(&v->slow_lock);
+	k_condvar_init(&v->slow_cond);
+	k_work_init(&v->wake_work, virtq_wake_handler);
+
+	/*
+	 * No waiter can exist before the queue is returned to the caller, so
+	 * this also guarantees that the wake workqueue is running before the
+	 * first notification can be submitted.
+	 */
+	virtio_wake_queue_start_once();
 
 	return 0;
 }
 
 void virtq_free(struct virtq *v)
 {
+	struct k_work_sync sync;
+
+	__ASSERT(!k_is_in_isr(), "virtqueues must be freed from thread context");
+	__ASSERT(atomic_get(&v->waiters) == 0, "virtqueue freed with blocked waiters");
+
+	/*
+	 * The caller has quiesced all submission and completion sources of this
+	 * queue, so only this queue's own notification may be pending. The
+	 * shared workqueue is never drained: that would reject other
+	 * virtqueues' wakeups.
+	 */
+	(void)k_work_flush(&v->wake_work, &sync);
+
 	k_free(v->desc);
 }
 
@@ -103,30 +469,25 @@ static void virtq_add_available(struct virtq *v, uint16_t desc_idx)
 	v->avail->idx = sys_cpu_to_le16(idx + 1);
 }
 
-static void virtq_return_desc_chain(struct virtq *v, uint16_t head, uint16_t count)
-{
-	uint16_t curr = head;
-
-	for (uint16_t i = 0; i < count; i++) {
-		uint16_t next = sys_le16_to_cpu(v->desc[curr].next);
-
-		virtq_add_free_desc(v, curr);
-		curr = next;
-	}
-}
-
 int virtq_add_buffer_chain(
 	struct virtq *v, struct virtq_buf *bufs, uint16_t bufs_size,
 	uint16_t device_readable_count, virtq_receive_callback cb, void *cb_opaque,
 	k_timeout_t timeout)
 {
-	if (bufs_size == 0) {
+	uint64_t total_len = 0;
+	uint16_t head;
+	int ret;
+
+	if (bufs_size == 0U) {
 		return -EINVAL;
 	}
 
-	uint64_t total_len = 0;
+	/* A single chain can never need more descriptors than the queue has. */
+	if (bufs_size > v->num) {
+		return -EINVAL;
+	}
 
-	for (int i = 0; i < bufs_size; i++) {
+	for (uint16_t i = 0; i < bufs_size; i++) {
 		total_len += bufs[i].len;
 	}
 
@@ -135,39 +496,31 @@ int virtq_add_buffer_chain(
 		return -EINVAL;
 	}
 
-	uint16_t prev_desc = VIRTQ_DESC_NEXT_SENTINEL;
-	uint16_t head = VIRTQ_DESC_NEXT_SENTINEL;
+	/* All-or-nothing: the whole chain is reserved or nothing is. */
+	ret = virtq_reserve(v, bufs_size, &head, timeout);
+	if (ret != 0) {
+		return ret;
+	}
+
+	uint16_t desc = head;
 
 	for (uint16_t buf_n = 0; buf_n < bufs_size; buf_n++) {
-		uint16_t desc;
-		/* popped outside the queue lock as k_stack_pop() may block */
-		int ret = virtq_get_free_desc(v, &desc, timeout);
+		/* The reservation linked the chain through next. */
+		uint16_t next = sys_le16_to_cpu(v->desc[desc].next);
+		uint16_t flags = buf_n < device_readable_count ? 0U : VIRTQ_DESC_F_WRITE;
 
-		if (ret != 0) {
-			virtq_return_desc_chain(v, head, buf_n);
-			return ret;
-		}
-
-		if (head == VIRTQ_DESC_NEXT_SENTINEL) {
-			head = desc;
-		}
-
-		uint16_t flags = buf_n < device_readable_count ? 0 : VIRTQ_DESC_F_WRITE;
-
-		if (buf_n < bufs_size - 1) {
+		if (buf_n < bufs_size - 1U) {
 			flags |= VIRTQ_DESC_F_NEXT;
+			v->desc[desc].next = sys_cpu_to_le16(next);
 		} else {
-			v->desc[desc].next = 0;
+			v->desc[desc].next = 0U;
 		}
+
 		v->desc[desc].addr = sys_cpu_to_le64(k_mem_phys_addr(bufs[buf_n].addr));
 		v->desc[desc].len = sys_cpu_to_le32(bufs[buf_n].len);
 		v->desc[desc].flags = sys_cpu_to_le16(flags);
 
-		if (prev_desc != VIRTQ_DESC_NEXT_SENTINEL) {
-			v->desc[prev_desc].next = sys_cpu_to_le16(desc);
-		}
-
-		prev_desc = desc;
+		desc = next;
 	}
 
 	v->recv_cbs[head].cb = cb;
@@ -183,15 +536,11 @@ int virtq_add_buffer_chain(
 
 int virtq_get_free_desc(struct virtq *v, uint16_t *desc_idx, k_timeout_t timeout)
 {
-	stack_data_t desc;
-
-	int ret = k_stack_pop(&v->free_desc_stack, &desc, timeout);
+	uint16_t desc;
+	int ret = virtq_reserve(v, 1U, &desc, timeout);
 
 	if (ret == 0) {
-		*desc_idx = (uint16_t)desc;
-		K_SPINLOCK(&v->lock) {
-			v->free_desc_n--;
-		}
+		*desc_idx = desc;
 	}
 
 	return ret;
@@ -199,8 +548,31 @@ int virtq_get_free_desc(struct virtq *v, uint16_t *desc_idx, k_timeout_t timeout
 
 void virtq_add_free_desc(struct virtq *v, uint16_t desc_idx)
 {
-	k_stack_push(&v->free_desc_stack, desc_idx);
-	K_SPINLOCK(&v->lock) {
-		v->free_desc_n++;
+	const char *rejected = NULL;
+	bool wake = false;
+	k_spinlock_key_t key;
+
+	if (desc_idx >= v->num) {
+		LOG_ERR("invalid descriptor %u (queue size %u)", desc_idx, v->num);
+		return;
+	}
+
+	key = k_spin_lock(&v->lock);
+
+	if (!virtq_release_allowed(v, 1U)) {
+		rejected = "released to a full queue";
+	} else {
+		wake = virtq_publish_locked(v, desc_idx, 1U);
+	}
+
+	k_spin_unlock(&v->lock, key);
+
+	if (rejected != NULL) {
+		LOG_ERR("descriptor %u %s (size %u)", desc_idx, rejected, v->num);
+		return;
+	}
+
+	if (wake) {
+		virtq_submit_wake(v);
 	}
 }

@@ -129,6 +129,16 @@ Other notable changes
   * :kconfig:option:`CONFIG_BT_PRIVACY` can now be enabled in Broadcaster- and Observer-only builds,
     without :kconfig:option:`CONFIG_BT_SMP`.
 
+* Virtio
+
+  * Descriptor chain submission is all-or-nothing and waits with a single timeout budget for the
+    whole chain instead of one budget per descriptor. A submitter that cannot get its whole chain
+    no longer holds part of the free list, so it can no longer make smaller submissions fail with
+    ``-EBUSY``. Threads blocked for descriptors are woken by a dedicated workqueue shared by all
+    virtqueues; its stack size and priority are set with
+    :kconfig:option:`CONFIG_VIRTIO_WAKE_QUEUE_STACK_SIZE` and
+    :kconfig:option:`CONFIG_VIRTIO_WAKE_QUEUE_PRIORITY`.
+
 ..
   Any more descriptive subsystem or driver changes. Do you really want to write
   a paragraph or is it enough to link to the documentation of the change?

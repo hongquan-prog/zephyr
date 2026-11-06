@@ -150,6 +150,25 @@ OPAMP
   without device runtime PM are unaffected: the device is resumed at init and the instance comes
   up enabled as before. (:github:`122135`)
 
+Virtio
+======
+
+* :c:func:`virtq_add_buffer_chain` now reserves the whole descriptor chain at once. A chain that
+  needs more descriptors than the queue has is rejected with ``-EINVAL`` instead of being
+  partially submitted, a chain that does not fit within the timeout returns ``-EAGAIN``, and a
+  caller that cannot wait (interrupt context or ``K_NO_WAIT``) gets ``-EBUSY`` when the queue is
+  exhausted. Check the return value wherever the queue can be short of descriptors. Blocking
+  submission is only allowed from a sleepable thread with an independent completion source, and
+  never while holding a spinlock or with interrupts locked.
+
+* :kconfig:option:`CONFIG_VIRTIO` now depends on :kconfig:option:`CONFIG_MULTITHREADING`,
+  because blocking queue submission uses a mutex and a condition variable. Configurations that
+  enabled a virtio driver without multithreading no longer build.
+
+* :c:func:`virtq_get_free_desc` and :c:func:`virtq_add_free_desc` are deprecated in favour of
+  :c:func:`virtq_add_buffer_chain`. They keep working, including blocking, and are scheduled for
+  removal with :github:`124526`.
+
 .. zephyr-keep-sorted-stop
 
 Bluetooth
