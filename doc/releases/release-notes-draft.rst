@@ -139,6 +139,10 @@ Other notable changes
     :kconfig:option:`CONFIG_VIRTIO_WAKE_QUEUE_STACK_SIZE` and
     :kconfig:option:`CONFIG_VIRTIO_WAKE_QUEUE_PRIORITY`.
 
+  * The experimental :c:func:`virtio_buf_is_directly_addressable` helper reports whether a buffer
+    range can be handed to a virtio device without a bounce buffer, so drivers can handle buffers
+    outside the boot-time RAM mapping instead of programming an unusable physical address.
+
 ..
   Any more descriptive subsystem or driver changes. Do you really want to write
   a paragraph or is it enough to link to the documentation of the change?
